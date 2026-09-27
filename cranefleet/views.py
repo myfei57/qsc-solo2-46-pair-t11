@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from . import cluster as fleet
 from . import limit as limit_module
 from . import slew as slew_module
+from . import trolley as trolley_module
 from . import zone as zone_module
 from .config import config_view
 from .geometry import compute_separation
@@ -74,10 +75,27 @@ def slew_view(console: "Console") -> dict[str, object]:
 
 def trolley_view(console: "Console") -> dict[str, object]:
     trolley = console.trolley
+    zones = console.trolley_zones
+    position = trolley.position_now()
+    direction = trolley.direction_now()
     return {
         "id": trolley.id,
-        "position": trolley.position_now(),
+        "position": position,
         "moving": trolley.is_moving(),
+        "speed": trolley.speed_now(),
+        "direction": direction,
+        "hold": trolley.hold_now(),
+        "segment": trolley_module.segment_at(zones, position),
+        "target_speed": trolley_module.target_speed(zones, position, direction),
+        "zones": {
+            "hard_minimum": zones.hard_minimum,
+            "hard_maximum": zones.hard_maximum,
+            "soft_minimum": zones.soft_minimum,
+            "soft_maximum": zones.soft_maximum,
+            "buffer": zones.buffer,
+            "rated_speed": zones.rated_speed,
+            "creep_speed": zones.creep_speed,
+        },
         "last_speed": console.speedometer.last_speed(),
     }
 

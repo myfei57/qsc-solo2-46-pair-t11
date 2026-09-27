@@ -97,6 +97,57 @@ class DispatchFlowTests(unittest.TestCase):
         status, payload = dispatch(self.console, "POST", "/api/hoist/stop")
         self.assertFalse(payload["data"]["moving"])
 
+    def test_trolley_drive_zoned_speed_flow(self) -> None:
+        status, payload = dispatch(
+            self.console, "POST", "/api/trolley/drive", {"direction": "out", "seconds": 5}
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error"], "hook not lowered")
+        status, payload = dispatch(
+            self.console, "POST", "/api/trolley/drive", {"direction": "sideways"}
+        )
+        self.assertEqual(status, 400)
+        dispatch(self.console, "POST", "/api/crane/command", {"source": "cab", "action": "lower"})
+        status, payload = dispatch(
+            self.console, "POST", "/api/trolley/drive", {"direction": "out", "seconds": 5}
+        )
+        self.assertEqual(status, 200)
+        data = payload["data"]
+        self.assertTrue(data["moving"])
+        self.assertGreater(data["position"], 0.0)
+        self.assertEqual(data["segment"], "normal")
+        self.assertEqual(data["speed"], 1.0)
+        status, payload = dispatch(
+            self.console, "POST", "/api/trolley/drive", {"direction": "out", "seconds": 120}
+        )
+        self.assertEqual(payload["data"]["hold"], "soft")
+        self.assertFalse(payload["data"]["moving"])
+        self.assertGreater(payload["data"]["position"], 59.0)
+        self.assertLessEqual(payload["data"]["position"], 59.5 + 0.05)
+        self.assertTrue(
+            any(entry.action == "trolley-soft-stop" for entry in self.console.audit.snapshot())
+        )
+        status, payload = dispatch(
+            self.console, "POST", "/api/trolley/drive", {"direction": "in", "seconds": 5}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["data"]["hold"], "")
+        self.assertTrue(payload["data"]["moving"])
+        self.assertLess(payload["data"]["position"], 59.0)
+
+    def test_trolley_hard_limit_backstop_flow(self) -> None:
+        dispatch(self.console, "POST", "/api/crane/command", {"source": "cab", "action": "lower"})
+        self.console.trolley.position = 65.0
+        status, payload = dispatch(
+            self.console, "POST", "/api/trolley/drive", {"direction": "out", "seconds": 1}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["data"]["hold"], "hard")
+        self.assertEqual(payload["data"]["position"], 60.0)
+        self.assertFalse(payload["data"]["moving"])
+        status, payload = dispatch(self.console, "GET", "/api/limit/state")
+        self.assertTrue(payload["data"]["stopped"]["trolley"])
+
     def test_command_stop_priority(self) -> None:
         dispatch(self.console, "POST", "/api/slew/start")
         dispatch(self.console, "POST", "/api/crane/command", {"source": "cab", "action": "stop"})

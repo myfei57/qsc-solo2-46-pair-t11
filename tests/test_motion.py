@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import unittest
 
 from cranefleet.audit import Audit
@@ -9,6 +10,7 @@ from cranefleet.errors import (
     FeedbackNotConfirmed,
     HoistBusy,
     HookNotLowered,
+    InvalidTravelZones,
     SlewBlocked,
     SlewBusy,
     SlewIdle,
@@ -46,9 +48,28 @@ from cranefleet.slew import (
     swing,
 )
 from cranefleet.store import MemoryStore
-from cranefleet.trolley import Speedometer, Trolley
+from cranefleet.trolley import (
+    DIRECTION_IN,
+    DIRECTION_OUT,
+    HOLD_HARD,
+    HOLD_NONE,
+    HOLD_SOFT,
+    SEGMENT_BUFFER,
+    SEGMENT_HARD,
+    SEGMENT_NORMAL,
+    SEGMENT_SOFT,
+    Speedometer,
+    TravelZones,
+    Trolley,
+    move,
+    move_resume,
+    segment_at,
+    step,
+    target_speed,
+    travel,
+)
 from cranefleet.trolley import limit_stop as trolley_limit_stop
-from cranefleet.trolley import move, move_resume, stop as trolley_stop
+from cranefleet.trolley import stop as trolley_stop
 from cranefleet.zone import ZoneState
 
 BOUNDARY = [Point(0.0, 0.0), Point(100.0, 0.0), Point(100.0, 100.0), Point(0.0, 100.0)]
@@ -183,6 +204,130 @@ class TrolleyTests(unittest.TestCase):
         self.assertEqual(speedometer.sample(0.0, 0.0), 0.0)
         self.assertAlmostEqual(speedometer.sample(5.0, 2.0), 2.5)
         self.assertAlmostEqual(speedometer.last_speed(), 2.5)
+
+
+class TrolleyZoneTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.trolley = Trolley("crane-1")
+        self.hoist = Hoist("crane-1")
+        lower(self.hoist)
+        self.zones = TravelZones(
+            hard_minimum=0.0,
+            hard_maximum=10.0,
+            soft_margin=0.5,
+            buffer=2.0,
+            rated_speed=1.0,
+            creep_speed=0.2,
+            decel=0.5,
+        )
+
+    def test_invalid_zones_are_rejected(self) -> None:
+        with self.assertRaises(InvalidTravelZones):
+            TravelZones(hard_minimum=10.0, hard_maximum=0.0)
+        with self.assertRaises(InvalidTravelZones):
+            TravelZones(soft_margin=40.0)
+        with self.assertRaises(InvalidTravelZones):
+            TravelZones(buffer=0.0)
+        with self.assertRaises(InvalidTravelZones):
+            TravelZones(creep_speed=2.0, rated_speed=1.0)
+        with self.assertRaises(InvalidTravelZones):
+            TravelZones(decel=0.0)
+
+    def test_segment_classification(self) -> None:
+        self.assertEqual(segment_at(self.zones, 5.0), SEGMENT_NORMAL)
+        self.assertEqual(segment_at(self.zones, 8.0), SEGMENT_BUFFER)
+        self.assertEqual(segment_at(self.zones, 1.5), SEGMENT_BUFFER)
+        self.assertEqual(segment_at(self.zones, 9.7), SEGMENT_SOFT)
+        self.assertEqual(segment_at(self.zones, 0.2), SEGMENT_SOFT)
+        self.assertEqual(segment_at(self.zones, 10.5), SEGMENT_HARD)
+
+    def test_target_speed_follows_the_zones(self) -> None:
+        self.assertEqual(target_speed(self.zones, 5.0, DIRECTION_OUT), 1.0)
+        self.assertEqual(target_speed(self.zones, 8.5, DIRECTION_OUT), 0.2)
+        self.assertAlmostEqual(
+            target_speed(self.zones, 9.48, DIRECTION_OUT), math.sqrt(2.0 * 0.5 * 0.02)
+        )
+        self.assertEqual(target_speed(self.zones, 9.5, DIRECTION_OUT), 0.0)
+        self.assertEqual(target_speed(self.zones, 9.8, DIRECTION_OUT), 0.0)
+        self.assertEqual(target_speed(self.zones, 9.8, DIRECTION_IN), 1.0)
+        self.assertEqual(target_speed(self.zones, 1.0, DIRECTION_IN), 0.2)
+        self.assertEqual(target_speed(self.zones, 0.5, DIRECTION_IN), 0.0)
+
+    def test_soft_limit_decelerates_then_holds(self) -> None:
+        move(self.trolley, self.hoist, DIRECTION_OUT)
+        samples = []
+        for _ in range(400):
+            speed = step(self.trolley, self.zones, 0.1)
+            samples.append((self.trolley.position_now(), speed))
+            if not self.trolley.is_moving():
+                break
+        self.assertEqual(self.trolley.hold_now(), HOLD_SOFT)
+        self.assertEqual(self.trolley.speed_now(), 0.0)
+        final = self.trolley.position_now()
+        self.assertGreater(final, 9.0)
+        self.assertLessEqual(final, self.zones.soft_maximum + 0.05)
+        for position, speed in samples:
+            self.assertLessEqual(speed, self.zones.rated_speed)
+            if position > 8.5:
+                self.assertLessEqual(speed, self.zones.creep_speed + 1e-9)
+
+    def test_hard_limit_is_the_backstop(self) -> None:
+        move(self.trolley, self.hoist, DIRECTION_OUT)
+        self.trolley.position = 12.0
+        step(self.trolley, self.zones, 0.1)
+        self.assertEqual(self.trolley.position_now(), 10.0)
+        self.assertFalse(self.trolley.is_moving())
+        self.assertEqual(self.trolley.speed_now(), 0.0)
+        self.assertEqual(self.trolley.hold_now(), HOLD_HARD)
+
+    def test_limit_stop_marks_hard_hold(self) -> None:
+        move(self.trolley, self.hoist, DIRECTION_OUT)
+        trolley_limit_stop(self.trolley)
+        self.assertFalse(self.trolley.is_moving())
+        self.assertEqual(self.trolley.hold_now(), HOLD_HARD)
+
+    def test_stop_takes_effect_mid_travel(self) -> None:
+        move(self.trolley, self.hoist, DIRECTION_OUT)
+        travel(self.trolley, self.zones, 2.0)
+        self.assertTrue(self.trolley.is_moving())
+        trolley_stop(self.trolley)
+        stopped_at = self.trolley.position_now()
+        travel(self.trolley, self.zones, 5.0)
+        self.assertFalse(self.trolley.is_moving())
+        self.assertEqual(self.trolley.speed_now(), 0.0)
+        self.assertEqual(self.trolley.position_now(), stopped_at)
+        self.assertEqual(self.trolley.hold_now(), HOLD_NONE)
+
+    def test_reverse_releases_the_soft_hold(self) -> None:
+        move(self.trolley, self.hoist, DIRECTION_OUT)
+        travel(self.trolley, self.zones, 40.0)
+        self.assertEqual(self.trolley.hold_now(), HOLD_SOFT)
+        move(self.trolley, self.hoist, DIRECTION_IN)
+        travel(self.trolley, self.zones, 5.0)
+        self.assertTrue(self.trolley.is_moving())
+        self.assertEqual(self.trolley.hold_now(), HOLD_NONE)
+        self.assertLess(self.trolley.position_now(), 9.0)
+        travel(self.trolley, self.zones, 40.0)
+        self.assertEqual(self.trolley.hold_now(), HOLD_SOFT)
+        self.assertFalse(self.trolley.is_moving())
+        self.assertGreaterEqual(self.trolley.position_now(), self.zones.soft_minimum - 0.05)
+        self.assertLess(self.trolley.position_now(), 1.0)
+
+    def test_reversal_brakes_through_zero(self) -> None:
+        move(self.trolley, self.hoist, DIRECTION_OUT)
+        travel(self.trolley, self.zones, 3.0)
+        self.assertEqual(self.trolley.speed_now(), 1.0)
+        move(self.trolley, self.hoist, DIRECTION_IN)
+        speeds = [step(self.trolley, self.zones, 0.1) for _ in range(25)]
+        self.assertTrue(any(abs(speed) < 1e-9 for speed in speeds))
+        self.assertLess(speeds[-1], 0.0)
+        self.assertEqual(min(speeds), speeds[-1])
+
+    def test_move_defaults_to_outward(self) -> None:
+        move(self.trolley, self.hoist)
+        self.assertEqual(self.trolley.direction_now(), DIRECTION_OUT)
+        move(self.trolley, self.hoist, DIRECTION_IN)
+        self.assertEqual(self.trolley.direction_now(), DIRECTION_IN)
 
 
 class HoistTests(unittest.TestCase):

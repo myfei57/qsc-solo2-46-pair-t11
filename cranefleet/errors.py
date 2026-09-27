@@ -59,6 +59,10 @@ class HookNotLowered(TrolleyError):
     """Raised when the trolley moves before the hook is lowered."""
 
 
+class InvalidTravelZones(TrolleyError):
+    """Raised when the travel zones are inconsistent or unsafe."""
+
+
 class HoistError(CraneFleetError):
     """Base class for hoist failures."""
 

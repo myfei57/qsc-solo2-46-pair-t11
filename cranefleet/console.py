@@ -41,13 +41,15 @@ from .hoist import Drum, Hoist
 from .limit import Limit
 from .slew import Ramp, Slew, SpeedFeedback
 from .store import Store
-from .trolley import Speedometer, Trolley
+from .trolley import Speedometer, TravelZones, Trolley
 from .wind import Gust, Wind
 from .zone import ZoneState
 
 Handler = Callable[["Request"], tuple[int, dict[str, Any]]]
 
 LOGGER = logging.getLogger("cranefleet.console")
+
+MAX_DRIVE_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
@@ -96,6 +98,7 @@ class Console:
         feedback: SpeedFeedback,
         config: SiteConfig,
         web_root: str = "web",
+        trolley_zones: TravelZones | None = None,
     ) -> None:
         self.store = store
         self.cluster = cluster
@@ -110,6 +113,7 @@ class Console:
         self.feedback = feedback
         self.config = config
         self.web_root = web_root
+        self.trolley_zones = trolley_zones or TravelZones()
         self.ramp = Ramp()
         self.drum = Drum(0.8)
         self.speedometer = Speedometer()
@@ -134,6 +138,7 @@ class Console:
             ("GET", "/api/crane/load"): self.handle_crane_load,
             ("POST", "/api/crane/reset"): self.handle_crane_reset,
             ("GET", "/api/trolley/state"): self.handle_trolley_state,
+            ("POST", "/api/trolley/drive"): self.handle_trolley_drive,
             ("POST", "/api/trolley/resume"): self.handle_trolley_resume,
             ("GET", "/api/hoist/state"): self.handle_hoist_state,
             ("POST", "/api/hoist/payout"): self.handle_hoist_payout,
@@ -362,6 +367,27 @@ class Console:
     def handle_trolley_state(self, request: Request) -> tuple[int, dict[str, Any]]:
         return 200, ok(views.trolley_view(self))
 
+    def handle_trolley_drive(self, request: Request) -> tuple[int, dict[str, Any]]:
+        if not request.body_valid:
+            return 400, fail("bad request")
+        direction = _direction(request.body.get("direction"))
+        if direction is None:
+            return 400, fail("direction must be 'in' or 'out'")
+        seconds = min(_positive_number(request.body.get("seconds"), 1.0), MAX_DRIVE_SECONDS)
+        try:
+            trolley_module.move(self.trolley, self.hoist, direction)
+        except HookNotLowered:
+            return 409, fail("hook not lowered")
+        trolley_module.travel(self.trolley, self.trolley_zones, seconds)
+        hold = self.trolley.hold_now()
+        if hold == trolley_module.HOLD_SOFT:
+            self.audit.record(self.trolley.id, "trolley-soft-stop", "soft limit reached")
+        elif hold == trolley_module.HOLD_HARD:
+            limit_module.trip(self.limit, limit_module.AXIS_TROLLEY)
+            limit_module.arbitrate(self.limit, self.slew, self.trolley, self.hoist)
+            self.audit.record(self.trolley.id, "trolley-hard-stop", "hard limit backstop")
+        return 200, ok(views.trolley_view(self))
+
     def handle_trolley_resume(self, request: Request) -> tuple[int, dict[str, Any]]:
         try:
             trolley_module.move_resume(self.trolley, self.hoist, self.store)
@@ -481,6 +507,22 @@ def _number(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _positive_number(value: Any, fallback: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def _direction(value: Any) -> int | None:
+    if value in (None, "", "out"):
+        return trolley_module.DIRECTION_OUT
+    if value == "in":
+        return trolley_module.DIRECTION_IN
+    return None
 
 
 def _positive_int(value: str | None, fallback: int) -> int:

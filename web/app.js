@@ -50,6 +50,7 @@ async function refresh() {
   const zone = data.zone || {};
   const slew = data.slew || {};
   const hoist = data.hoist || {};
+  const trolley = data.trolley || {};
   const wind = data.wind || {};
   const limit = data.limit || {};
   const cluster = data.cluster || {};
@@ -69,6 +70,7 @@ async function refresh() {
   $("crane-data").textContent = JSON.stringify(cluster, null, 2);
   $("zone-data").textContent = JSON.stringify(zone, null, 2);
   $("hoist-data").textContent = JSON.stringify(hoist, null, 2);
+  $("trolley-data").textContent = JSON.stringify(trolley, null, 2);
   $("alarm-data").textContent = JSON.stringify({ wind, limit }, null, 2);
   $("config-data").textContent = JSON.stringify(data.config || {}, null, 2);
   const audit = await api("/api/audit?limit=15");
@@ -134,6 +136,21 @@ $("release-btn").addEventListener("click", async () => {
 
 $("trolley-btn").addEventListener("click", async () => {
   await post("/api/crane/command", { source: "cab", action: "trolley", axis: "trolley" });
+  refresh();
+});
+
+$("trolley-out-btn").addEventListener("click", async () => {
+  await post("/api/trolley/drive", { direction: "out", seconds: 10 });
+  refresh();
+});
+
+$("trolley-in-btn").addEventListener("click", async () => {
+  await post("/api/trolley/drive", { direction: "in", seconds: 10 });
+  refresh();
+});
+
+$("trolley-stop-btn").addEventListener("click", async () => {
+  await post("/api/crane/command", { source: "cab", action: "stop", axis: "trolley" });
   refresh();
 });
 

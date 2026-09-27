@@ -20,7 +20,7 @@ from .hoist import Hoist
 from .limit import Limit
 from .slew import Slew, SpeedFeedback
 from .store import FileStore, MemoryStore, Store, decode_snapshot, encode_snapshot
-from .trolley import Trolley
+from .trolley import Trolley, TravelZones
 from .wind import Wind
 from .zone import ZoneState
 
@@ -98,6 +98,7 @@ def build_app(data_dir: str = "data", web_root: str = "web") -> App:
         feedback=feedback,
         config=config,
         web_root=web_root,
+        trolley_zones=TravelZones(),
     )
     audit.record("system", "boot", "control service started")
     return App(console=console, store=store, audit=audit, snapshot_path=snapshot_path)
