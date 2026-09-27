@@ -59,6 +59,10 @@ class HookNotLowered(TrolleyError):
     """Raised when the trolley moves before the hook is lowered."""
 
 
+class HardLimitHeld(TrolleyError):
+    """Raised when motion is commanded while the hard-limit latch holds."""
+
+
 class HoistError(CraneFleetError):
     """Base class for hoist failures."""
 

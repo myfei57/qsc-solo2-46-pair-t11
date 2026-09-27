@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from . import cluster as fleet
 from . import limit as limit_module
+from . import profile as profile_module
 from . import slew as slew_module
 from . import zone as zone_module
 from .config import config_view
@@ -79,6 +80,7 @@ def trolley_view(console: "Console") -> dict[str, object]:
         "position": trolley.position_now(),
         "moving": trolley.is_moving(),
         "last_speed": console.speedometer.last_speed(),
+        "drive": profile_module.drive_view(console.drive, trolley),
     }
 
 

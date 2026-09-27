@@ -37,6 +37,29 @@ function setOnline(online) {
   node.classList.toggle("offline", !online);
 }
 
+const DRIVE_STATE_LABELS = {
+  idle: "待机",
+  running: "运行",
+  stopping: "减速停车",
+  "soft-held": "软限位保持",
+  "hard-held": "硬限位锁定",
+};
+
+let scanTimer = null;
+
+function scheduleTrolleyScan(drive) {
+  if (scanTimer) {
+    clearTimeout(scanTimer);
+    scanTimer = null;
+  }
+  if (drive.state === "running" || drive.state === "stopping") {
+    scanTimer = setTimeout(async () => {
+      await post("/api/trolley/step", { dt: 0.5 });
+      refresh();
+    }, 300);
+  }
+}
+
 async function refresh() {
   let state;
   try {
@@ -50,10 +73,14 @@ async function refresh() {
   const zone = data.zone || {};
   const slew = data.slew || {};
   const hoist = data.hoist || {};
+  const trolley = data.trolley || {};
+  const drive = trolley.drive || {};
   const wind = data.wind || {};
   const limit = data.limit || {};
   const cluster = data.cluster || {};
   const pair = cluster.nearest_pair || {};
+  const driveTone =
+    drive.state === "hard-held" ? "danger" : drive.state === "soft-held" || drive.state === "stopping" ? "warn" : "";
   renderCards([
     ["塔吊数量", Object.keys(cluster.positions || {}).length],
     ["分区占用", (zone.occupants || []).length, zone.conflict ? "danger" : ""],
@@ -61,6 +88,8 @@ async function refresh() {
     ["回转状态", slew.moving ? "运转" : "停止", wind.active ? "warn" : ""],
     ["落钩状态", hoist.hook_lowered ? "已落钩" : "未落钩", hoist.hook_lowered ? "" : "warn"],
     ["制动状态", hoist.brake_engaged ? "抱闸" : "松闸"],
+    ["变幅驱动", DRIVE_STATE_LABELS[drive.state] || "待机", driveTone],
+    ["小车位置", (trolley.position || 0).toFixed(2) + " m" + (trolley.moving ? "（" + (drive.speed || 0).toFixed(2) + " m/s）" : "")],
     ["风速", (wind.level || 0).toFixed(1) + " m/s", wind.active ? "danger" : ""],
     ["限位闩锁", limit.latch ? "锁定" : "释放", limit.latch ? "danger" : ""],
     ["最近间距", pair.distance ? pair.distance.toFixed(1) + " 米" : "—", pair.below_safe ? "danger" : ""],
@@ -69,8 +98,10 @@ async function refresh() {
   $("crane-data").textContent = JSON.stringify(cluster, null, 2);
   $("zone-data").textContent = JSON.stringify(zone, null, 2);
   $("hoist-data").textContent = JSON.stringify(hoist, null, 2);
+  $("trolley-data").textContent = JSON.stringify(trolley, null, 2);
   $("alarm-data").textContent = JSON.stringify({ wind, limit }, null, 2);
   $("config-data").textContent = JSON.stringify(data.config || {}, null, 2);
+  scheduleTrolleyScan(drive);
   const audit = await api("/api/audit?limit=15");
   $("audit-data").textContent = JSON.stringify(audit.data || [], null, 2);
   $("overview-log").textContent = JSON.stringify((audit.data || []).slice(0, 5), null, 2);
@@ -132,8 +163,28 @@ $("release-btn").addEventListener("click", async () => {
   refresh();
 });
 
-$("trolley-btn").addEventListener("click", async () => {
-  await post("/api/crane/command", { source: "cab", action: "trolley", axis: "trolley" });
+$("trolley-out-btn").addEventListener("click", async () => {
+  await post("/api/trolley/command", { direction: 1 });
+  refresh();
+});
+
+$("trolley-in-btn").addEventListener("click", async () => {
+  await post("/api/trolley/command", { direction: -1 });
+  refresh();
+});
+
+$("trolley-stop-btn").addEventListener("click", async () => {
+  await post("/api/trolley/command", { direction: 0 });
+  refresh();
+});
+
+$("trolley-step-btn").addEventListener("click", async () => {
+  await post("/api/trolley/step", { dt: 0.5 });
+  refresh();
+});
+
+$("trolley-reset-btn").addEventListener("click", async () => {
+  await post("/api/trolley/reset");
   refresh();
 });
 

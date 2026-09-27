@@ -7,6 +7,9 @@ from dataclasses import dataclass
 
 from .audit import Audit
 from .hoist import Hoist, lower as hoist_lower, raise_hook, stop as hoist_stop
+from .profile import TrolleyDrive
+from .profile import command as drive_command
+from .profile import request_stop as drive_request_stop
 from .slew import Slew, swing, stop as slew_stop
 from .trolley import Trolley, move as trolley_move, stop as trolley_stop
 
@@ -156,14 +159,23 @@ def execute(
     slew: Slew,
     trolley: Trolley,
     hoist: Hoist,
+    drive: TrolleyDrive | None = None,
     recorder: Audit | None = None,
 ) -> Command:
-    """Execute the currently merged command against the machine modules."""
+    """Execute the currently merged command against the machine modules.
+
+    When a trolley drive is supplied, trolley travel and trolley stops are
+    routed through the position-segmented speed profile; without one the
+    legacy flag-only behaviour is kept.
+    """
 
     command = crane.last_command()
     if command.action == ACTION_STOP:
         if command.axis == AXIS_TROLLEY:
-            trolley_stop(trolley, recorder)
+            if drive is None:
+                trolley_stop(trolley, recorder)
+            else:
+                drive_request_stop(drive, trolley, recorder)
         elif command.axis == AXIS_HOIST:
             hoist_stop(hoist, recorder)
         else:
@@ -171,9 +183,18 @@ def execute(
     elif command.action == ACTION_SWING:
         swing(slew, command.angle, recorder)
     elif command.action == ACTION_TROLLEY:
-        trolley_move(trolley, hoist)
+        if drive is None:
+            trolley_move(trolley, hoist)
+        else:
+            drive_command(drive, trolley, hoist, _trolley_direction(command))
     elif command.action == ACTION_RAISE:
         raise_hook(hoist, recorder)
     elif command.action == ACTION_LOWER:
         hoist_lower(hoist)
     return command
+
+
+def _trolley_direction(command: Command) -> float:
+    """A non-negative angle commands outward travel, negative inward."""
+
+    return 1.0 if command.angle >= 0 else -1.0

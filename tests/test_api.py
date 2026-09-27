@@ -119,6 +119,54 @@ class DispatchFlowTests(unittest.TestCase):
         self.assertEqual(payload["data"]["ramp_target"], 45.0)
         self.assertEqual(status, 200)
 
+    def test_trolley_profile_flow(self) -> None:
+        status, payload = dispatch(self.console, "POST", "/api/trolley/command", {"direction": 1})
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error"], "hook not lowered")
+        dispatch(self.console, "POST", "/api/crane/command", {"source": "cab", "action": "lower"})
+        status, payload = dispatch(self.console, "POST", "/api/trolley/command", {"direction": 1})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["data"]["drive"]["state"], "running")
+
+        status, payload = dispatch(self.console, "POST", "/api/trolley/step", {"dt": 45})
+        self.assertEqual(payload["data"]["drive"]["segment"], "middle")
+        self.assertAlmostEqual(payload["data"]["drive"]["speed"], 1.0)
+        status, payload = dispatch(self.console, "POST", "/api/trolley/step", {"dt": 120})
+        self.assertTrue(payload["data"]["soft_stopped"])
+        self.assertFalse(payload["data"]["hard_tripped"])
+        self.assertEqual(payload["data"]["drive"]["state"], "soft-held")
+        self.assertAlmostEqual(payload["data"]["position"], 60.0, delta=0.2)
+
+        dispatch(self.console, "POST", "/api/trolley/command", {"direction": 1})
+        status, payload = dispatch(self.console, "GET", "/api/trolley/state")
+        self.assertEqual(payload["data"]["drive"]["state"], "soft-held")
+        status, payload = dispatch(self.console, "POST", "/api/trolley/command", {"direction": -1})
+        self.assertEqual(payload["data"]["drive"]["state"], "running")
+        dispatch(self.console, "POST", "/api/trolley/command", {"direction": 0})
+        dispatch(self.console, "POST", "/api/trolley/step", {"dt": 10})
+        status, payload = dispatch(self.console, "GET", "/api/trolley/state")
+        self.assertEqual(payload["data"]["drive"]["state"], "idle")
+        self.assertFalse(payload["data"]["moving"])
+
+    def test_crane_command_trolley_uses_the_drive(self) -> None:
+        dispatch(self.console, "POST", "/api/crane/command", {"source": "cab", "action": "lower"})
+        status, payload = dispatch(
+            self.console, "POST", "/api/crane/command", {"source": "cab", "action": "trolley", "axis": "trolley"}
+        )
+        self.assertEqual(status, 200)
+        status, payload = dispatch(self.console, "GET", "/api/trolley/state")
+        self.assertEqual(payload["data"]["drive"]["state"], "running")
+        self.assertEqual(payload["data"]["drive"]["direction"], 1)
+
+        dispatch(self.console, "POST", "/api/trolley/step", {"dt": 5})
+        dispatch(self.console, "POST", "/api/crane/command", {"source": "cab", "action": "stop", "axis": "trolley"})
+        status, payload = dispatch(self.console, "GET", "/api/trolley/state")
+        self.assertEqual(payload["data"]["drive"]["state"], "stopping")
+        dispatch(self.console, "POST", "/api/trolley/step", {"dt": 5})
+        status, payload = dispatch(self.console, "GET", "/api/trolley/state")
+        self.assertEqual(payload["data"]["drive"]["state"], "idle")
+        self.assertFalse(payload["data"]["moving"])
+
     def test_bad_bodies_and_config(self) -> None:
         request = Request("POST", "/api/config", {}, {}, body_valid=False)
         status, _ = self.console.dispatch(request)

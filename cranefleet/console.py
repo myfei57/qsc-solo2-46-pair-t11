@@ -16,6 +16,7 @@ from . import config as site_config
 from . import crane as crane_module
 from . import hoist as hoist_module
 from . import limit as limit_module
+from . import profile as profile_module
 from . import slew as slew_module
 from . import trolley as trolley_module
 from . import views
@@ -28,6 +29,7 @@ from .crane import Crane
 from .errors import (
     CraneFleetError,
     FeedbackNotConfirmed,
+    HardLimitHeld,
     HoistBusy,
     HookNotLowered,
     SlewBlocked,
@@ -113,6 +115,7 @@ class Console:
         self.ramp = Ramp()
         self.drum = Drum(0.8)
         self.speedometer = Speedometer()
+        self.drive = profile_module.TrolleyDrive(profile_module.TrolleyProfile())
         self.gust = Gust()
         self.load = crane_module.Load(2.4)
         self._routes: dict[tuple[str, str], Handler] = {
@@ -135,6 +138,9 @@ class Console:
             ("POST", "/api/crane/reset"): self.handle_crane_reset,
             ("GET", "/api/trolley/state"): self.handle_trolley_state,
             ("POST", "/api/trolley/resume"): self.handle_trolley_resume,
+            ("POST", "/api/trolley/command"): self.handle_trolley_command,
+            ("POST", "/api/trolley/step"): self.handle_trolley_step,
+            ("POST", "/api/trolley/reset"): self.handle_trolley_reset,
             ("GET", "/api/hoist/state"): self.handle_hoist_state,
             ("POST", "/api/hoist/payout"): self.handle_hoist_payout,
             ("POST", "/api/hoist/feedback"): self.handle_hoist_feedback,
@@ -315,11 +321,15 @@ class Console:
             crane_module.apply_cab(crane, command)
         self._book_keeping(command)
         try:
-            crane_module.execute(crane, self.slew, self.trolley, self.hoist, self.audit)
+            crane_module.execute(
+                crane, self.slew, self.trolley, self.hoist, self.drive, self.audit
+            )
         except SlewIdle:
             return 409, fail("slew is idle")
         except HookNotLowered:
             return 409, fail("hook not lowered")
+        except HardLimitHeld:
+            return 409, fail("hard limit held; reset required")
         except HoistBusy:
             return 409, fail("hoist busy")
         if command.action == crane_module.ACTION_LOWER:
@@ -360,6 +370,42 @@ class Console:
     # -------------------------------------------------------- trolley / hoist
 
     def handle_trolley_state(self, request: Request) -> tuple[int, dict[str, Any]]:
+        return 200, ok(views.trolley_view(self))
+
+    def handle_trolley_command(self, request: Request) -> tuple[int, dict[str, Any]]:
+        if not request.body_valid:
+            return 400, fail("bad request")
+        direction = _number(request.body.get("direction"))
+        try:
+            if direction == 0:
+                profile_module.request_stop(self.drive, self.trolley, self.audit)
+            else:
+                profile_module.command(
+                    self.drive, self.trolley, self.hoist, direction, self.audit
+                )
+        except HookNotLowered:
+            return 409, fail("hook not lowered")
+        except HardLimitHeld:
+            return 409, fail("hard limit held; reset required")
+        return 200, ok(views.trolley_view(self))
+
+    def handle_trolley_step(self, request: Request) -> tuple[int, dict[str, Any]]:
+        if not request.body_valid:
+            return 400, fail("bad request")
+        seconds = _number(request.body.get("dt", 0.5))
+        result = profile_module.step(self.drive, self.trolley, self.limit, seconds, self.audit)
+        self.speedometer.sample(self.trolley.position_now(), seconds)
+        if result.hard_tripped:
+            limit_module.arbitrate(self.limit, self.slew, self.trolley, self.hoist)
+            self.audit.record("system", "limit-enforce", "axes=trolley")
+        payload = views.trolley_view(self)
+        payload["hard_tripped"] = result.hard_tripped
+        payload["soft_stopped"] = result.soft_stopped
+        return 200, ok(payload)
+
+    def handle_trolley_reset(self, request: Request) -> tuple[int, dict[str, Any]]:
+        if profile_module.reset(self.drive, self.trolley, self.audit):
+            limit_module.reset_arbitration(self.limit)
         return 200, ok(views.trolley_view(self))
 
     def handle_trolley_resume(self, request: Request) -> tuple[int, dict[str, Any]]:
